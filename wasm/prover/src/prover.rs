@@ -66,6 +66,12 @@ enum ProverPhases {
     CreateProof,
 }
 
+// Example function to log the elapsed time.
+fn log_timing(phase: ProverPhases, start: Instant) {
+    let duration = start.elapsed();
+    info!("{} took: {:.2?}", phase.get_message().unwrap(), duration);
+}
+
 fn log_phase(phase: ProverPhases) {
     info!("tlsn-js {}: {}", phase as u8, phase.get_message().unwrap());
 }
@@ -77,7 +83,7 @@ pub async fn prover(
     secret_headers: JsValue,
     secret_body: JsValue,
 ) -> Result<String, JsValue> {
-    info!("target_url: {}", target_url_str);
+    info!("LOCAL LOGS WORK target_url: {}", target_url_str);
     let target_url = Url::parse(target_url_str)
         .map_err(|e| JsValue::from_str(&format!("Could not parse target_url: {:?}", e)))?;
 
@@ -91,9 +97,7 @@ pub async fn prover(
         .map_err(|e| JsValue::from_str(&format!("Could not deserialize options: {:?}", e)))?;
     info!("options.notary_url: {}", options.notary_url.as_str());
 
-    let start_time = Instant::now();
-
-
+    let overall_start = Instant::now();
 
     /*
      * Connect Notary with websocket
@@ -163,46 +167,54 @@ pub async fn prover(
         .expect_throw("assume the notary ws connection succeeds");
     let notary_ws_stream_into = notary_ws_stream.into_io();
 
+    log_timing(ProverPhases::BuildProverConfig, overall_start);
+
+    let start_time = Instant::now();
     log_phase(ProverPhases::BuildProverConfig);
 
     let target_host = target_url
         .host_str()
         .ok_or(JsValue::from_str("Could not get target host"))?;
 
-        // Basic default prover config
-        let mut builder = ProverConfig::builder();
+    // Basic default prover config
+    let mut builder = ProverConfig::builder();
 
-        if let Some(max_sent_data) = options.max_sent_data {
-            builder.max_sent_data(max_sent_data);
-        }
-        if let Some(max_recv_data) = options.max_recv_data {
-            builder.max_recv_data(max_recv_data);
-        }
-        let config = builder
-            .id(notarization_response.session_id)
-            .server_dns(target_host)
-            .build()
-            .map_err(|e| JsValue::from_str(&format!("Could not build prover config: {:?}", e)))?;
+    if let Some(max_sent_data) = options.max_sent_data {
+        builder.max_sent_data(max_sent_data);
+    }
+    if let Some(max_recv_data) = options.max_recv_data {
+        builder.max_recv_data(max_recv_data);
+    }
+    let config = builder
+        .id(notarization_response.session_id)
+        .server_dns(target_host)
+        .build()
+        .map_err(|e| JsValue::from_str(&format!("Could not build prover config: {:?}", e)))?;
 
 
-
+    log_timing(ProverPhases::BuildProverConfig, start_time);
     // Create a Prover and set it up with the Notary
     // This will set up the MPC backend prior to connecting to the server.
     log_phase(ProverPhases::SetUpProver);
+    let start_time = Instant::now();
     let prover = Prover::new(config)
         .setup(notary_ws_stream_into)
         .await
         .map_err(|e| JsValue::from_str(&format!("Could not set up prover: {:?}", e)))?;
 
+    log_timing(ProverPhases::SetUpProver, start_time);
     /*
        Connect Application Server with websocket proxy
     */
+
     log_phase(ProverPhases::ConnectWsProxy);
+    let start_time = Instant::now();
 
     let (_, client_ws_stream) = WsMeta::connect(options.websocket_proxy_url, None)
         .await
         .expect_throw("assume the client ws connection succeeds");
-
+    
+    log_timing(ProverPhases::ConnectWsProxy, start_time);
     // Bind the Prover to the server connection.
     // The returned `mpc_tls_connection` is an MPC TLS connection to the Server: all data written
     // to/read from it will be encrypted/decrypted using MPC with the Notary.
@@ -256,10 +268,12 @@ pub async fn prover(
         req_with_header.body(Full::from(options.body))
     };
 
+
     let unwrapped_request = req_with_body
         .map_err(|e| JsValue::from_str(&format!("Could not build request: {:?}", e)))?;
 
     log_phase(ProverPhases::StartMpcConnection);
+    let start_time = Instant::now();
 
     // Defer decryption of the response.
     prover_ctrl
@@ -280,8 +294,11 @@ pub async fn prover(
             response.status()
         )));
     }
+    log_timing(ProverPhases::StartMpcConnection, start_time);
 
     log_phase(ProverPhases::ParseResponse);
+    let start_time = Instant::now();
+
     // Pretty printing :)
     let payload = response
         .into_body()
@@ -294,9 +311,15 @@ pub async fn prover(
     let response_pretty = serde_json::to_string_pretty(&parsed)
         .map_err(|e| JsValue::from_str(&format!("Could not serialize response: {:?}", e)))?;
     info!("Response: {}", response_pretty);
+    let response_size = payload.len();
+    info!("Response size: {} bytes", response_size);
+
+    log_timing(ProverPhases::ParseResponse, start_time);
+    
 
     // Close the connection to the server
     log_phase(ProverPhases::CloseConnection);
+    let start_time = Instant::now();
     let mut client_socket = connection_receiver
         .await
         .map_err(|e| {
@@ -313,8 +336,12 @@ pub async fn prover(
         .await
         .map_err(|e| JsValue::from_str(&format!("Could not close socket: {:?}", e)))?;
 
+    
+    log_timing(ProverPhases::CloseConnection, start_time);
     // The Prover task should be done now, so we can grab it.
     log_phase(ProverPhases::StartNotarization);
+    let start_time = Instant::now();
+
     let prover = prover_receiver
         .await
         .map_err(|e| {
@@ -345,7 +372,10 @@ pub async fn prover(
         secret_body_slices.as_slice(),
     );
 
+    log_timing(ProverPhases::StartNotarization, start_time);
+
     log_phase(ProverPhases::Commit);
+    let start_time = Instant::now();
 
     let _recv_len = prover.recv_transcript().data().len();
 
@@ -388,17 +418,25 @@ pub async fn prover(
             .map(|_| ())
     })?;
 
+    log_timing(ProverPhases::Commit, start_time);
+
     // Finalize, returning the notarized session
     log_phase(ProverPhases::Finalize);
+    let start_time = Instant::now();
+
     let notarized_session = prover
         .finalize()
         .await
         .map_err(|e| JsValue::from_str(&format!("Error finalizing prover: {:?}", e)))?;
 
+    log_timing(ProverPhases::Finalize, start_time);
+
     log_phase(ProverPhases::NotarizationComplete);
 
     // Create a proof for all committed data in this session
     log_phase(ProverPhases::CreateProof);
+    let start_time = Instant::now();
+
     let session_proof = notarized_session.session_proof();
 
     let mut proof_builder = notarized_session.data().build_substrings_proof();
@@ -423,10 +461,12 @@ pub async fn prover(
         substrings: substrings_proof,
     };
 
+    log_timing(ProverPhases::CreateProof, start_time);
+
     let res = serde_json::to_string_pretty(&proof)
         .map_err(|e| JsValue::from_str(&format!("Could not serialize proof: {:?}", e)))?;
 
-    let duration = start_time.elapsed();
+    let duration = overall_start.elapsed();
     info!("!@# request took {} seconds", duration.as_secs());
 
     Ok(res)

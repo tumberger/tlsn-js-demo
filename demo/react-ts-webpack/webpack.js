@@ -2,6 +2,8 @@ var webpack = require('webpack'),
   path = require('path'),
   CopyWebpackPlugin = require('copy-webpack-plugin'),
   HtmlWebpackPlugin = require('html-webpack-plugin');
+  
+  const Dotenv = require('dotenv-webpack');
 
 const ASSET_PATH = process.env.ASSET_PATH || '/';
 
@@ -94,6 +96,7 @@ var options = {
     new webpack.ProvidePlugin({
       Buffer: ['buffer', 'Buffer'],
     }),
+    new Dotenv(),
   ].filter(Boolean),
   // Required by wasm-bindgen-rayon, in order to use SharedArrayBuffer on the Web
   // Ref:
